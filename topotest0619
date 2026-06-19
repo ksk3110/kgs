@@ -1,0 +1,177 @@
+import numpy as np
+import ufl
+import basix.ufl
+from dolfinx import mesh, fem, io
+from dolfinx.fem import petsc
+from mpi4py import MPI
+import warnings
+
+# ガベージコレクションによる致命的ではない警告を非表示にする
+warnings.filterwarnings("ignore", category=UserWarning, module="dolfinx")
+
+# ==========================================
+# 1. 物理パラメータと基本メッシュ設定
+# ==========================================
+f = 500.0  
+omega = 2 * np.pi * f
+c = 343.0  
+k_val = omega / c  
+
+x_min, x_max = 0.0, 50.0
+y_min, y_max = 0.0, 10.0
+nx, ny = 150, 30  
+domain = mesh.create_rectangle(MPI.COMM_WORLD, [[x_min, y_min], [x_max, y_max]], [nx, ny])
+
+sub_element = basix.ufl.element("Lagrange", domain.topology.cell_name(), 1)
+element_p = basix.ufl.blocked_element(sub_element, shape=(2,))
+V = fem.functionspace(domain, element_p)
+V_scalar = fem.functionspace(domain, sub_element)
+coords = V_scalar.tabulate_dof_coordinates()
+
+# ==========================================
+# 2. 固定外壁と1mの最適化設計領域の定義 (浮動小数点公差による隔離を含む)
+# ==========================================
+t = 0.4 
+tol = 1e-5  # 微小な公差を導入し、境界における判定の曖昧さを完全に解決
+
+# A. 常に固定される外周のコの字型壁 (外壁ノードを確実に捉えるため、判定範囲をtolだけ広げる)
+fixed_left = (coords[:, 0] >= 10.0 - t - tol) & (coords[:, 0] <= 10.0 + tol) & (coords[:, 1] >= 2.0 - tol)
+fixed_top = (coords[:, 1] >= 10.0 - t - tol) & (coords[:, 1] <= 10.0 + tol) & (coords[:, 0] >= 10.0 - t - tol) & (coords[:, 0] <= 40.0 + t + tol)
+fixed_right = (coords[:, 0] >= 40.0 - tol) & (coords[:, 0] <= 40.0 + t + tol) & (coords[:, 1] >= 2.0 - tol)
+fixed_mask = fixed_left | fixed_top | fixed_right
+fixed_indices = np.where(fixed_mask)[0]
+
+# B. コの字型壁の内縁1mの最適化設計領域 (外壁と完全に区別するため、範囲をtolだけ狭める)
+design_left = (coords[:, 0] >= 10.0 + tol) & (coords[:, 0] <= 11.0 - tol) & (coords[:, 1] >= 2.0 + tol) & (coords[:, 1] <= 9.6 - tol)
+design_right = (coords[:, 0] >= 39.0 + tol) & (coords[:, 0] <= 40.0 - tol) & (coords[:, 1] >= 2.0 + tol) & (coords[:, 1] <= 9.6 - tol)
+design_top = (coords[:, 0] >= 11.0 + tol) & (coords[:, 0] <= 39.0 - tol) & (coords[:, 1] >= 8.6 + tol) & (coords[:, 1] <= 9.6 - tol)
+design_mask = design_left | design_right | design_top
+design_indices = np.where(design_mask)[0]
+
+# 密度関数を宣言し、初期状態として全領域を空気 (0.0) に設定
+rho = fem.Function(V_scalar)
+rho.x.array[:] = 0.0
+rho.x.array[fixed_indices] = 1.0  # 外壁を 1.0 に固定
+
+# ==========================================
+# 3. 音響物理変分方程式の設定 (大幅な高速化のためループの外に配置)
+# ==========================================
+x_ufl = ufl.SpatialCoordinate(domain)
+monitor_mask = ufl.conditional(ufl.Or(((x_ufl[0]-5.0)**2 + (x_ufl[1]-2.0)**2) <= 0.4**2, 
+                                      ((x_ufl[0]-45.0)**2 + (x_ufl[1]-2.0)**2) <= 0.4**2), 1.0, 0.0)
+
+def open_boundaries(x):
+    return (np.isclose(x[0], x_min) | np.isclose(x[0], x_max) | 
+            np.isclose(x[1], y_min) | np.isclose(x[1], y_max))
+tdim = domain.topology.dim
+fdim = tdim - 1
+domain.topology.create_connectivity(fdim, tdim)
+open_facets = mesh.locate_entities_boundary(domain, fdim, open_boundaries)
+facet_tag = mesh.meshtags(domain, fdim, open_facets, np.full_like(open_facets, 2))
+ds = ufl.Measure("ds", domain=domain, subdomain_data=facet_tag)
+
+f_expr = fem.Function(V)
+source_coord = np.array([25.0, 2.0, 0.0])
+sigma = 0.2
+def source_gaussian(x):
+    r_sq = (x[0] - source_coord[0]) ** 2 + (x[1] - source_coord[1]) ** 2
+    val = (1.0 / (2 * np.pi * sigma**2)) * np.exp(-r_sq / (2 * sigma**2))
+    return np.vstack((val, np.zeros_like(val)))
+f_expr.interpolate(source_gaussian)
+
+p, v = ufl.TrialFunction(V), ufl.TestFunction(V)
+p_r, p_i, v_r, v_i = p[0], p[1], v[0], v[1]
+k_constant = fem.Constant(domain, k_val)
+L = (f_expr[0] * v_r + f_expr[1] * v_i) * ufl.dx
+
+wall_damping = k_val * 3.0
+kr = k_val * (1.0 - 0.8 * rho**3)
+ki = wall_damping * (rho**3)
+
+a = (ufl.dot(ufl.grad(p_r), ufl.grad(v_r)) - (kr**2 - ki**2) * p_r * v_r - (2 * kr * ki) * p_i * v_r) * ufl.dx
+a += (ufl.dot(ufl.grad(p_i), ufl.grad(v_i)) - (kr**2 - ki**2) * p_i * v_i + (2 * kr * ki) * p_r * v_i) * ufl.dx
+a += -k_constant * p_i * v_r * ds(2) + k_constant * p_r * v_i * ds(2)
+
+# 順解析を実行し客観関数 J を計算するコア関数
+def compute_current_J():
+    # 構造の整合性を維持するため、ソルバー実行直前に固定外壁を強制的に 1.0 に設定
+    rho.x.array[fixed_indices] = 1.0
+    
+    try:
+        problem = petsc.LinearProblem(
+            a, L, bcs=[], 
+            petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+            petsc_options_prefix="stoch_eval_"
+        )
+        p_sol = problem.solve()
+        J = fem.assemble_scalar(fem.form((p_sol[0]**2 + p_sol[1]**2) * monitor_mask * ufl.dx))
+        return J, p_sol
+    except Exception as e:
+        return 1e5, None
+
+# ==========================================
+# 4. 🚀 ランダムヒルクライミング・トポロジー最適化エンジン (メインループ)
+# ==========================================
+print("\n" + "="*55)
+print("🚀 ランダムトポロジー最適化：安全ロック・純白黒モード起動！")
+print("="*55)
+
+# 初期状態（ライニングなし）の J 値を計算
+current_J, current_p = compute_current_J()
+print(f"🌱 初期状態（ライニングなし）騒音エネルギー J_start = {current_J:.6e}")
+
+max_steps = 200  
+successful_mutations = 0
+
+for step in range(1, max_steps + 1):
+    # 現在の密度配置をバックアップ (Functionの内部配列を直接コピー)
+    backup_rho_array = rho.x.array.copy()
+    
+    # 設計領域内から中心となるノードをランダムに選択
+    center_idx = np.random.choice(design_indices)
+    cx, cy = coords[center_idx, 0], coords[center_idx, 1]
+    
+    # この中心点から半径 0.7 メートル以内にあるすべてのノードを抽出
+    dist = np.sqrt((coords[design_indices, 0] - cx)**2 + (coords[design_indices, 1] - cy)**2)
+    local_mutate_indices = design_indices[dist <= 0.7]
+    
+    # 選択された領域をまとめて「壁 (1.0)」にするか「空気 (0.0)」にするかをランダムに決定
+    new_value = 1.0 if np.random.rand() > 0.4 else 0.0
+    rho.x.array[local_mutate_indices] = new_value
+    
+    # 制約条件：総体積が設計領域の 50% を超えていないかチェック
+    if np.mean(rho.x.array[design_indices]) > 0.5:
+        rho.x.array[:] = backup_rho_array # 体積制約違反のため、変更をロールバック
+        continue
+        
+    # 突然変異後の騒音レベルを計算
+    test_J, test_p = compute_current_J()
+    
+    # 評価判定：外部の騒音が低減した場合 (test_J < current_J)、この変更を受け入れる
+    if test_J < current_J:
+        current_J = test_J
+        current_p = test_p
+        successful_mutations += 1
+        print(f"  ✨ [ステップ {step}/{max_steps}] 最適化成功！J が低下 -> {current_J:.6e} (累計成功回数: {successful_mutations} 回)")
+        
+        # 白黒構造ファイルを保存
+        with io.XDMFFile(domain.comm, "stochastic_density.xdmf", "w") as xdmf_rho:
+            xdmf_rho.write_mesh(domain)
+            xdmf_rho.write_function(rho)
+            
+        if current_p is not None:
+            p_abs = fem.Function(V_scalar, dtype=np.float64)
+            p_abs.x.array[:] = np.sqrt(current_p.x.array[0::2]**2 + current_p.x.array[1::2]**2)
+            with io.XDMFFile(domain.comm, "stochastic_pressure.xdmf", "w") as xdmf_p:
+                xdmf_p.write_mesh(domain)
+                xdmf_p.write_function(p_abs)
+    else:
+        # 騒音が増加した場合は、直ちに突然変異前の構造に復元
+        rho.x.array[:] = backup_rho_array
+        if step % 40 == 0:
+            print(f"  💤 [ステップ {step}/{max_steps}] 探索中... 現在の最適値 J = {current_J:.6e}")
+
+print("\n" + "="*55)
+print("🎉 【ランダムトポロジー最適化テスト終了】")
+print(f"👉 最終最適化構造における騒音エネルギー J_final = {current_J:.6e}")
+print("="*55 + "\n")
