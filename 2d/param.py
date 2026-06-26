@@ -10,3 +10,8 @@ k_val = omega / c
 # メッシュ生成（粗くして高速化）
 x_min, x_max = 0.0, 100.0
 y_min, y_max = 0.0, 30.0
+
+# 設計可能領域
+def desinable(coord):
+  return (35.0 <= coord[0] <= 55.0) and
+          (1.0 <= coord[1] <= 20.0)
