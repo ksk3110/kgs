@@ -15,3 +15,10 @@ y_min, y_max = 0.0, 30.0
 def desinable(coord):
   return (35.0 <= coord[0] <= 55.0) and
           (1.0 <= coord[1] <= 20.0)
+
+initial_rcp = np.array([
+  [15.0, 2.0],
+  [15.0, 8.0],
+  [11.0, 11.0],
+  [0.0, 13.0]
+])
