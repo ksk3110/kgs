@@ -91,7 +91,7 @@ def _distance_to_segment(x, y, x1, y1, x2, y2):
 
     return np.hypot(x - closest_x, y - closest_y)
 
-def solve_helmholtz(V, rho, k_val, f_source, open_boundaries):
+def solve_helmholtz(domain, V, rho, k_val, f_source, open_boundaries):
     """
     ヘルムホルツ方程式の弱形式を解く。
 
@@ -114,7 +114,6 @@ def solve_helmholtz(V, rho, k_val, f_source, open_boundaries):
         ヘルムホルツ方程式の解
 
     """
-    domain = V.mesh
     tdim = domain.topology.dim
     fdim = tdim - 1
     domain.topology.create_connectivity(fdim, tdim)
@@ -133,7 +132,7 @@ def solve_helmholtz(V, rho, k_val, f_source, open_boundaries):
     # 弱形式
     p = ufl.TrialFunction(V)
     v = ufl.TestFunction(V)
-    p_r, p_i = p[0], p[1]
+    p_r, p_i = ufl.split(p)[0], ufl.split(p)[1]
     v_r, v_i = v[0], v[1]
 
     a = (ufl.dot(ufl.grad(p_r), ufl.grad(v_r)) -
