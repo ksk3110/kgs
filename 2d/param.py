@@ -17,11 +17,10 @@ ny = int((y_max - y_min) * res)
 
 # 設計可能領域
 def desinable(coord):
-
-return (
-    (35.0 <= coord[0] <= 55.0) and
-    (1.0 <= coord[1] <= 20.0)
-)
+    return (
+        (35.0 <= coord[0] <= 55.0) and
+        (1.0 <= coord[1] <= 20.0)
+    )
 
 # 目的領域
 ox_min, ox_max = 65.0, x_max
