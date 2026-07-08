@@ -33,8 +33,7 @@ full_cp = right_side_cp_to_whole(right_side_cp, origin_coord=[(x_min+x_max)/2, y
 rho_function.x.array[:] = cp_to_density_light(full_cp, V_rho, path_width=1)
 
 def open_boundaries(x):
-    return (np.isclose(x[0], x_min) | np.isclose(x[0], x_max) |
-            np.isclose(x[1], y_min) | np.isclose(x[1], y_max))
+    return np.isclose(x[1], y_min)
 
 
 f_source = np.array([50.0, 50.0])
