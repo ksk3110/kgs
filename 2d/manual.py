@@ -35,7 +35,6 @@ rho_function.x.array[:] = cp_to_density_light(full_cp, V_rho, path_width=1)
 def open_boundaries(x):
     return np.isclose(x[1], y_min)
 
-
 f_source = np.array([50.0, 50.0])
 u_sol = solve_helmholtz(V, rho_function, k_val, f_source, open_boundaries)
 u_sol.name = "Solution"
