@@ -15,8 +15,9 @@ element = basix.ufl.blocked_element(sub_element, shape=(2,))
 V = fem.functionspace(domain, element)
 V_rho = fem.functionspace(domain, sub_element)
 
-xdmf = io.XDMFFile(domain.comm, "dist/test_output.xdmf", "w")
+xdmf = io.XDMFFile(domain.comm, "dist/testa_output.xdmf", "w")
 xdmf.write_mesh(domain)
+MPI.Init()
 
 rho_function = fem.Function(V_rho)
 rho_function.name = "Density"
@@ -37,7 +38,7 @@ def open_boundaries(x):
 
 
 f_source = np.array([50.0, 50.0])
-u_sol = solve_helmholtz(V, rho_function, k_val, f_source, open_boundaries)
+u_sol = solve_helmholtz(domain, V, rho_function, k_val, f_source, open_boundaries)
 u_sol.name = "Solution"
 
 V_score = fem.functionspace(domain, ("DG", 0))
