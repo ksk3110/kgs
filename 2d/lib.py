@@ -210,3 +210,27 @@ def _distance_to_segment_vector(X, Y, x1, y1, x2, y2):
     closest_x = x1 + t * dx
     closest_y = y1 + t * dy
     return np.hypot(X - closest_x, Y - closest_y)
+
+def evaluate(domain, p_sol):
+    """
+    評価関数
+    Args:
+        domain (dolfinx.mesh.Mesh): 領域
+        p_sol (ufl.Function): 音圧関数
+    Returns:
+        float: 目的関数の値
+    """
+
+    x = ufl.SpatialCoordinate(domain)
+    obj_region = ufl.conditional(
+        ufl.And(ufl.And(x[0] >= 20.0, x[0] <= 30.0),
+                ufl.And(x[1] >= 0.0, x[1] <= 3.0)),
+        1.0, 0.0
+    )
+
+    p_r, p_i = p_sol[0], p_sol[1]
+    J = fem.assemble_scalar(fem.form(
+        (p_r**2 + p_i**2) * obj_region * ufl.dx
+    ))
+
+    return J
