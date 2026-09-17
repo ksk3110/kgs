@@ -61,3 +61,12 @@ def solve_helmholtz_and_evaluate_perceptual_rms(
     # p_rms_perceptual = p_ref * (10.0 ** (spl_dBA / 20.0))
         
     return float(spl_dBA) # 聴覚補正後の騒音レベル[dB]
+
+def whole_controls_from_right_controls(
+    right_controls: np.NDArray[float, float]
+) -> np.NDArray[float]:
+    return []
+
+def rho_fields_from_controls(
+    controls: np.NDArray[float, float]
+) -> 
