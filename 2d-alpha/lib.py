@@ -6,6 +6,7 @@ from dolfinx.fem import petsc
 import gmsh
 import ufl
 import params
+import os
 
 def calculate_a_weighting(freq: float) -> float:
     """周波数 f [Hz] におけるA特性補正量 [dB] を計算する"""
@@ -17,6 +18,7 @@ def calculate_a_weighting(freq: float) -> float:
 
 def solve_helmholtz_and_evaluate_perceptual_rms(
     domain: mesh.Mesh,
+    facet_tags: mesh.MeshTags,
     freq: float,                  # 周波数 [Hz]
     source_pos: tuple,            # 音源位置 (x0, y0)
     amplitude_db: float = 96.0,       # 音源の振幅 (音量)
@@ -90,8 +92,28 @@ def solve_helmholtz_and_evaluate_perceptual_rms(
         # メッシュと音圧フィールド（Pa & dB）の書き出し
         with io.XDMFFile(domain.comm, output_filename, "w") as xdmf:
             xdmf.write_mesh(domain)
-            xdmf.write_function(p_abs, step)
             xdmf.write_function(p_db, step)
+
+        wall_facets = facet_tags.find(10)
+        wall_mesh, _, _, _ = mesh.create_submesh(domain, domain.topology.dim - 1, wall_facets)
+
+        # ファイル名を "step_000.xdmf" -> "wall_step_000.xdmf" に自動変換
+        dir_name, base_name = os.path.split(output_filename)
+        wall_filename = os.path.join(dir_name, f"wall_{base_name}")
+        print(wall_filename)
+
+        with io.XDMFFile(domain.comm, wall_filename, "w") as xdmf_wall:# 1. 1Dメッシュの書き出し
+                    xdmf_wall.write_mesh(wall_mesh)
+
+                    # 2. ダミー値の代わりに評価値 J (spl_dBA) を割り当て
+                    V_wall = fem.functionspace(wall_mesh, ("Lagrange", 1))
+                    j_func = fem.Function(V_wall, name="Wall_J_dBA")
+
+                    # メッシュの全節点に現在のステップの J(dBA) を代入
+                    j_func.x.array[:] = spl_dBA
+
+                    # 時間 t と一緒に関数を書き出すことで、時系列認識 ＆ 評価値の可視化を実現
+                    xdmf_wall.write_function(j_func, step)
 
 
     return float(spl_dBA) # 聴覚補正後の騒音レベル[dBA]
@@ -104,7 +126,7 @@ def rho_fields_from_controls(
 ):
 
     gmsh.initialize()
-    gmsh.option.setNumber("General.Terminal", 1)
+    gmsh.option.setNumber("General.Terminal", 0)
 
     # --- エラー回路回避用オプション ---
     # 1. 幾何交差のトレランス（許容誤差）を少し緩める

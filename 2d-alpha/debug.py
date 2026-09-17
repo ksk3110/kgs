@@ -27,6 +27,7 @@ def objective(y_vars):
         # 2. ヘルムホルツ解析 ＆ XDMFファイル出力
         J = lib.solve_helmholtz_and_evaluate_perceptual_rms(
             domain=domain,
+            facet_tags=facet_tags,
             freq=params.test_freqs[0],
             source_pos=(0.0, 1.0),
             amplitude_db=params.test_amplitude,
