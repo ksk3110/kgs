@@ -1,7 +1,8 @@
 import numpy as np
 from mpi4py import MPI
-from dolfinx import mesh, fem
+from dolfinx import mesh, fem, io
 from dolfinx.io import gmsh as fenics_gmsh
+from dolfinx.fem import petsc
 import gmsh
 import ufl
 import params
@@ -18,13 +19,18 @@ def solve_helmholtz_and_evaluate_perceptual_rms(
     domain: mesh.Mesh,
     freq: float,                  # 周波数 [Hz]
     source_pos: tuple,            # 音源位置 (x0, y0)
-    amplitude: float = 1.0,       # 音源の振幅 (音量)
-    c: float = 343.0
+    amplitude_db: float = 96.0,       # 音源の振幅 (音量)
+    c: float = 343.0,
+    output_filename: str = None,
+    step: int = 0
 ) -> float:
 
     comm = domain.comm
     omega = 2.0 * np.pi * freq
     k = omega / c
+
+    p0 = 2.0e-5
+    p_amp = p0 * (10.0 ** (amplitude_db / 20.0))
 
     V = fem.functionspace(domain, ("Lagrange", 1))
     u, v = ufl.TrialFunction(V), ufl.TestFunction(V)
@@ -32,16 +38,20 @@ def solve_helmholtz_and_evaluate_perceptual_rms(
     # --- 1. 音源振幅 (amplitude) を組み込んだガウス音源 ---
     x = ufl.SpatialCoordinate(domain)
     x0, y0 = source_pos
-    sigma = 0.02
+    sigma = 1.0
     r_sq = (x[0] - x0)**2 + (x[1] - y0)**2
     # 振幅 amplitude を掛け合わせる
-    source_expr = amplitude * ufl.exp(-r_sq / (2.0 * sigma**2))
+    source_expr = p_amp * ufl.exp(-r_sq / (2.0 * sigma**2)) # ヘルムホルツ方程式ではfとなっている
 
     dx = ufl.Measure("dx", domain=domain)
     a = (ufl.inner(ufl.grad(u), ufl.grad(v)) - (k**2) * ufl.inner(u, v)) * dx
     L = source_expr * v * dx
 
-    problem = fem.petsc.LinearProblem(a, L, bcs=[])
+    problem = petsc.LinearProblem(
+        a, L, bcs=[],
+        petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
+        petsc_options_prefix="helmholtz_solver_",
+    )
     p_field = problem.solve()
 
     # --- 2. 物理的な RMS 音圧 [Pa] の計算 ---
@@ -60,17 +70,39 @@ def solve_helmholtz_and_evaluate_perceptual_rms(
     a_weight_dB = calculate_a_weighting(freq)
     spl_dBA = spl_dB + a_weight_dB  # A特性補正後の音圧レベル [dBA]
 
-    # 聴覚補正後の等価音圧 [Pa] に逆換算
-    # p_rms_perceptual = p_ref * (10.0 ** (spl_dBA / 20.0))
 
-    return float(spl_dBA) # 聴覚補正後の騒音レベル[dB]
+    # === Paraview用に可視化 ===
+    if output_filename is not None:
+        V_out = fem.functionspace(domain, ("Lagrange", 1))
 
-def rho_fields_from_controls_robust(
+        # 物理音圧の絶対値 |p| [Pa]
+        p_abs = fem.Function(V_out, name="Pressure_Abs_Pa")
+        p_abs.interpolate(fem.Expression(
+            ufl.sqrt(ufl.inner(p_field, p_field)),
+            V_out.element.interpolation_points
+        ))
+
+        # 音圧レベル Lp [dB SPL]
+        p_db = fem.Function(V_out, name="Pressure_Level_dB")
+        p_abs_vals = p_abs.x.array
+        p_db.x.array[:] = 20.0 * np.log10(np.maximum(p_abs_vals, 1e-12) / p0)
+
+        # メッシュと音圧フィールド（Pa & dB）の書き出し
+        with io.XDMFFile(domain.comm, output_filename, "w") as xdmf:
+            xdmf.write_mesh(domain)
+            xdmf.write_function(p_abs, step)
+            xdmf.write_function(p_db, step)
+
+
+    return float(spl_dBA) # 聴覚補正後の騒音レベル[dBA]
+
+def rho_fields_from_controls(
     control_points: list,
     lc_domain: float = 2.0,    # 領域全体のメッシュサイズ (100x30に対して2.0~3.0が適正)
     lc_wall: float = 0.5,      # 壁周辺のメッシュサイズ (制御点間隔より十分小さく設定)
     comm: MPI.Comm = MPI.COMM_WORLD
 ):
+
     gmsh.initialize()
     gmsh.option.setNumber("General.Terminal", 1)
 
@@ -87,8 +119,8 @@ def rho_fields_from_controls_robust(
 
     gmsh.model.add("sound_domain_robust")
 
-    x_min, y_min = params.points[0]
-    x_max, y_max = params.points[1]
+    x_min, y_min = params.p_min
+    x_max, y_max = params.p_max
     width = x_max - x_min
     height = y_max - y_min
 
@@ -103,8 +135,8 @@ def rho_fields_from_controls_robust(
     gmsh.model.mesh.embed(1, [wall_curve], 2, rect)
 
     # 3. Physical Group の割り当て（タグ重複防止のため -1 を使用）
-    domain_tag = gmsh.model.addPhysicalGroup(2, [rect], 1, name="domain")
-    wall_tag = gmsh.model.addPhysicalGroup(1, [wall_curve], 10, name="wall")
+    gmsh.model.addPhysicalGroup(2, [rect], 1, name="domain")
+    gmsh.model.addPhysicalGroup(1, [wall_curve], 10, name="wall")
 
     # 4. メッシュサイズの設定と生成
     gmsh.model.mesh.setSize(gmsh.model.getEntities(0), lc_domain)
