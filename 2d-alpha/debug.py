@@ -10,7 +10,10 @@ step_counter = 0
 def objective(y_vars):
     global step_counter
 
-    control_points = list(zip(params.x_coords, y_vars))
+    control_points = list(zip(
+        [-x for x in params.x_coords[::-1]] + params.x_coords,
+        [*[y for y in y_vars[::-1]], *y_vars]
+    ))
 
     # ステップごとの出力ファイル名 (例: ./optimization_steps/step_000.xdmf)
     filename = os.path.join(params.output_dir, f"step_{step_counter:03d}.xdmf")
@@ -49,5 +52,5 @@ res = minimize(
     x0=params.y_init,
     method="COBYLA",
     bounds=bounds,
-    options={"maxiter": 10}
+    options={"maxiter": 50}
 )

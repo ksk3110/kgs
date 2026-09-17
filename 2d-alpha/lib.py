@@ -190,3 +190,27 @@ def rho_fields_from_controls(
 
     gmsh.finalize()
     return domain, cell_tags, facet_tags
+
+def right_side_cp_to_whole(right_side):
+    """右側半分の制御点から全体の座標を生成する。
+
+    Parameters
+    ----------
+    right_side : ndarray of shape (n_control, 2)
+        原点座標に対する右半分の制御点[x, y]列のパラメータ
+    origin_coord : ndarray of shape (2)
+        原点座標[x, y]
+
+    Returns
+    -------
+    ndarray
+        全体の座標
+    """
+
+    left_side = right_side[::-1] * [-1, 1]  # 右半分の制御点のx座標を反転して左半分にする
+    if left_side[-1][0] == 0:
+        left_side = left_side[:-1]  # 原点座標が0の場合は除去
+    coords = np.concatenate((left_side, right_side))
+
+    # 原点座標を変更
+    return coords
