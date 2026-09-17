@@ -19,6 +19,7 @@ def calculate_a_weighting(freq: float) -> float:
 def solve_helmholtz_and_evaluate_perceptual_rms(
     domain: mesh.Mesh,
     facet_tags: mesh.MeshTags,
+    cell_tags: mesh.MeshTags,
     freq: float,                  # 周波数 [Hz]
     source_pos: tuple,            # 音源位置 (x0, y0)
     amplitude_db: float = 96.0,       # 音源の振幅 (音量)
@@ -47,17 +48,19 @@ def solve_helmholtz_and_evaluate_perceptual_rms(
 
     dx = ufl.Measure("dx", domain=domain)
     a = (ufl.inner(ufl.grad(u), ufl.grad(v)) - (k**2) * ufl.inner(u, v)) * dx
+    # a = a_domain + a_open
     L = source_expr * v * dx
 
     problem = petsc.LinearProblem(
         a, L, bcs=[],
         petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
-        petsc_options_prefix="helmholtz_solver_",
+        petsc_options_prefix="helmholtz_solver_"
     )
     p_field = problem.solve()
 
     # --- 2. 物理的な RMS 音圧 [Pa] の計算 ---
-    p_sq_form = fem.form(ufl.inner(p_field, p_field) * dx)
+    ds = ufl.ds(domain=domain, subdomain_data=cell_tags)
+    p_sq_form = fem.form(ufl.inner(p_field, p_field) * ds)
     vol_form = fem.form(1.0 * dx)
 
     total_p_sq = comm.allreduce(np.real(fem.assemble_scalar(p_sq_form)), op=MPI.SUM)
@@ -100,20 +103,19 @@ def solve_helmholtz_and_evaluate_perceptual_rms(
         # ファイル名を "step_000.xdmf" -> "wall_step_000.xdmf" に自動変換
         dir_name, base_name = os.path.split(output_filename)
         wall_filename = os.path.join(dir_name, f"wall_{base_name}")
-        print(wall_filename)
 
         with io.XDMFFile(domain.comm, wall_filename, "w") as xdmf_wall:# 1. 1Dメッシュの書き出し
-                    xdmf_wall.write_mesh(wall_mesh)
+            xdmf_wall.write_mesh(wall_mesh)
 
-                    # 2. ダミー値の代わりに評価値 J (spl_dBA) を割り当て
-                    V_wall = fem.functionspace(wall_mesh, ("Lagrange", 1))
-                    j_func = fem.Function(V_wall, name="Wall_J_dBA")
+            # 2. ダミー値の代わりに評価値 J (spl_dBA) を割り当て
+            V_wall = fem.functionspace(wall_mesh, ("Lagrange", 1))
+            j_func = fem.Function(V_wall, name="Wall_J_dBA")
 
-                    # メッシュの全節点に現在のステップの J(dBA) を代入
-                    j_func.x.array[:] = spl_dBA
+            # メッシュの全節点に現在のステップの J(dBA) を代入
+            j_func.x.array[0] = spl_dBA
 
-                    # 時間 t と一緒に関数を書き出すことで、時系列認識 ＆ 評価値の可視化を実現
-                    xdmf_wall.write_function(j_func, step)
+            # 時間 t と一緒に関数を書き出すことで、時系列認識 ＆ 評価値の可視化を実現
+            xdmf_wall.write_function(j_func, step)
 
 
     return float(spl_dBA) # 聴覚補正後の騒音レベル[dBA]
@@ -173,7 +175,17 @@ def rho_fields_from_controls(
     )
 
     domain = mesh_data.mesh
-    cell_tags = mesh_data.cell_tags
+
+    target_cells = mesh.locate_entities(
+        domain,
+        domain.topology.dim,
+        params.target_region
+    )
+
+    # 3. セル用の Meshtags を作成して タグ「30」を付与
+    cell_values = np.full_like(target_cells, 30, dtype=np.int32)
+    cell_tags = mesh.meshtags(domain, domain.topology.dim, target_cells, cell_values)
+
     facet_tags = mesh_data.facet_tags
 
     gmsh.finalize()

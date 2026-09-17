@@ -1,7 +1,6 @@
 from scipy.optimize import minimize
 
 import lib
-import dolfinx.io
 import params
 import os
 import numpy as np
@@ -28,6 +27,7 @@ def objective(y_vars):
         J = lib.solve_helmholtz_and_evaluate_perceptual_rms(
             domain=domain,
             facet_tags=facet_tags,
+            cell_tags=cell_tags,
             freq=params.test_freqs[0],
             source_pos=(0.0, 1.0),
             amplitude_db=params.test_amplitude,
