@@ -20,105 +20,153 @@ def solve_helmholtz_and_evaluate_perceptual_rms(
     domain: mesh.Mesh,
     facet_tags: mesh.MeshTags,
     cell_tags: mesh.MeshTags,
-    freq: float,                  # 周波数 [Hz]
-    source_pos: tuple,            # 音源位置 (x0, y0)
-    amplitude_db: float = 96.0,       # 音源の振幅 (音量)
+    freq: float,  # 周波数 [Hz]
+    source_pos: tuple,  # 音源位置 (x0, y0)
+    amplitude_db: float = 96.0,  # 音源の振幅 (音量) [dB]
     c: float = 343.0,
     output_filename: str = None,
-    step: int = 0
+    step: int = 0,
 ) -> float:
 
     comm = domain.comm
     omega = 2.0 * np.pi * freq
-    k = omega / c
+    k_val = omega / c
 
     p0 = 2.0e-5
     p_amp = p0 * (10.0 ** (amplitude_db / 20.0))
 
-    V = fem.functionspace(domain, ("Lagrange", 1))
-    u, v = ufl.TrialFunction(V), ufl.TestFunction(V)
+    # --- 1. 実部・虚部を表現するため 2次元ベクトル空間 (実部, 虚部) を作成 ---
+    V = fem.functionspace(domain, ("Lagrange", 1, (2,)))
 
-    # --- 1. 音源振幅 (amplitude) を組み込んだガウス音源 ---
-    x = ufl.SpatialCoordinate(domain)
-    x0, y0 = source_pos
-    sigma = 1.0
-    r_sq = (x[0] - x0)**2 + (x[1] - y0)**2
-    # 振幅 amplitude を掛け合わせる
-    source_expr = p_amp * ufl.exp(-r_sq / (2.0 * sigma**2)) # ヘルムホルツ方程式ではfとなっている
+    u = ufl.TrialFunction(V)
+    v = ufl.TestFunction(V)
+    u_r, u_i = u[0], u[1]
+    v_r, v_i = v[0], v[1]
+
+    # メッシュ情報と境界測度の準備
+    tdim = domain.topology.dim
+    fdim = tdim - 1
+    domain.topology.create_connectivity(fdim, tdim)
+
+    # 放射境界 (ds(2))：下端(y_min)以外の外周
+    coords = domain.geometry.x
+    y_min = np.min(coords[:, 1])
+    eps = 1e-5
+    open_facets = mesh.locate_entities_boundary(
+        domain, fdim, lambda x: x[1] > (y_min + eps)
+    )
+    facet_tag_open = mesh.meshtags(
+        domain,
+        fdim,
+        open_facets,
+        np.full_like(open_facets, 2, dtype=np.int32),
+    )
 
     dx = ufl.Measure("dx", domain=domain)
-    a = (ufl.inner(ufl.grad(u), ufl.grad(v)) - (k**2) * ufl.inner(u, v)) * dx
-    # a = a_domain + a_open
-    L = source_expr * v * dx
+    ds = ufl.Measure("ds", domain=domain, subdomain_data=facet_tag_open)
 
+    # 弱形式（領域内）
+    a = (
+        ufl.dot(ufl.grad(u_r), ufl.grad(v_r))
+        - (k_val**2) * u_r * v_r
+        + ufl.dot(ufl.grad(u_i), ufl.grad(v_i))
+        - (k_val**2) * u_i * v_i
+    ) * dx
+
+    # 上・右・左の開放境界における Sommerfeld 放射境界条件 (-i k p v)
+    k_const = fem.Constant(domain, k_val)
+    a += (-k_const * u_i * v_r + k_const * u_r * v_i) * ds(2)
+
+    # ガウス音源
+    x_spatial = ufl.SpatialCoordinate(domain)
+    x0, y0 = source_pos
+    sigma = 0.15
+    r_sq = (x_spatial[0] - x0) ** 2 + (x_spatial[1] - y0) ** 2
+    source_expr = p_amp * ufl.exp(-r_sq / (2.0 * sigma**2))
+
+    # 音源（実部のみに入力）
+    L = (source_expr * v_r) * dx
+
+    # 求解
     problem = petsc.LinearProblem(
-        a, L, bcs=[],
+        a,
+        L,
+        bcs=[],
         petsc_options={"ksp_type": "preonly", "pc_type": "lu"},
-        petsc_options_prefix="helmholtz_solver_"
+        petsc_options_prefix="helmholtz_solver_",
     )
     p_field = problem.solve()
 
     # --- 2. 物理的な RMS 音圧 [Pa] の計算 ---
-    ds = ufl.ds(domain=domain, subdomain_data=cell_tags)
-    p_sq_form = fem.form(ufl.inner(p_field, p_field) * ds)
+    p_r_sol, p_i_sol = p_field[0], p_field[1]
+
+    # 領域全体 (dx) での |p|^2 の体積積分
+    p_sq_form = fem.form((p_r_sol**2 + p_i_sol**2) * dx)
     vol_form = fem.form(1.0 * dx)
 
-    total_p_sq = comm.allreduce(np.real(fem.assemble_scalar(p_sq_form)), op=MPI.SUM)
-    total_vol = comm.allreduce(np.real(fem.assemble_scalar(vol_form)), op=MPI.SUM)
+    total_p_sq = comm.allreduce(
+        np.real(fem.assemble_scalar(p_sq_form)), op=MPI.SUM
+    )
+    total_vol = comm.allreduce(
+        np.real(fem.assemble_scalar(vol_form)), op=MPI.SUM
+    )
 
-    p_rms_phys = np.sqrt(total_p_sq / total_vol) # 物理的な実効音圧 [Pa]
+    p_rms_phys = np.sqrt(total_p_sq / total_vol)  # 領域内の実効音圧 [Pa]
 
     # --- 3. 音圧レベル (SPL [dB]) および 聴覚補正 (dBA) の計算 ---
-    p_ref = 2.0e-5 # 基準音圧 20 µPa
-    spl_dB = 20.0 * np.log10(p_rms_phys / p_ref) if p_rms_phys > 0 else -np.inf
-
+    spl_dB = (
+        20.0 * np.log10(p_rms_phys / p0) if p_rms_phys > 1e-12 else -120.0
+    )
     a_weight_dB = calculate_a_weighting(freq)
     spl_dBA = spl_dB + a_weight_dB  # A特性補正後の音圧レベル [dBA]
 
-
     # === Paraview用に可視化 ===
     if output_filename is not None:
-        V_out = fem.functionspace(domain, ("Lagrange", 1))
+        V_scalar = fem.functionspace(domain, ("Lagrange", 1))
 
-        # 物理音圧の絶対値 |p| [Pa]
-        p_abs = fem.Function(V_out, name="Pressure_Abs_Pa")
-        p_abs.interpolate(fem.Expression(
-            ufl.sqrt(ufl.inner(p_field, p_field)),
-            V_out.element.interpolation_points
-        ))
+        # 音圧絶対値 |p| [Pa]
+        p_abs = fem.Function(V_scalar, name="Pressure_Abs_Pa")
+        expr_p_abs = fem.Expression(
+            ufl.sqrt(p_r_sol**2 + p_i_sol**2),
+            V_scalar.element.interpolation_points,
+        )
+        p_abs.interpolate(expr_p_abs)
+        p_abs.x.scatter_forward()
 
         # 音圧レベル Lp [dB SPL]
-        p_db = fem.Function(V_out, name="Pressure_Level_dB")
+        p_db = fem.Function(V_scalar, name="Pressure_Level_dB")
         p_abs_vals = p_abs.x.array
         p_db.x.array[:] = 20.0 * np.log10(np.maximum(p_abs_vals, 1e-12) / p0)
+        p_db.x.scatter_forward()
 
-        # メッシュと音圧フィールド（Pa & dB）の書き出し
+        # メッシュと音圧フィールドの書き出し
         with io.XDMFFile(domain.comm, output_filename, "w") as xdmf:
             xdmf.write_mesh(domain)
             xdmf.write_function(p_db, step)
 
+        # 壁面メッシュへの書き出し処理
         wall_facets = facet_tags.find(10)
-        wall_mesh, _, _, _ = mesh.create_submesh(domain, domain.topology.dim - 1, wall_facets)
+        if len(wall_facets) > 0:
+            wall_mesh, _, _, _ = mesh.create_submesh(
+                domain, domain.topology.dim - 1, wall_facets
+            )
 
-        # ファイル名を "step_000.xdmf" -> "wall_step_000.xdmf" に自動変換
-        dir_name, base_name = os.path.split(output_filename)
-        wall_filename = os.path.join(dir_name, f"wall_{base_name}")
+            dir_name, base_name = os.path.split(output_filename)
+            wall_filename = os.path.join(dir_name, f"wall_{base_name}")
 
-        with io.XDMFFile(domain.comm, wall_filename, "w") as xdmf_wall:# 1. 1Dメッシュの書き出し
-            xdmf_wall.write_mesh(wall_mesh)
+            with io.XDMFFile(domain.comm, wall_filename, "w") as xdmf_wall:
+                xdmf_wall.write_mesh(wall_mesh)
 
-            # 2. ダミー値の代わりに評価値 J (spl_dBA) を割り当て
-            V_wall = fem.functionspace(wall_mesh, ("Lagrange", 1))
-            j_func = fem.Function(V_wall, name="Wall_J_dBA")
+                V_wall = fem.functionspace(wall_mesh, ("Lagrange", 1))
+                j_func = fem.Function(V_wall, name="Wall_J_dBA")
 
-            # メッシュの全節点に現在のステップの J(dBA) を代入
-            j_func.x.array[0] = spl_dBA
+                # 壁面全節点に計算した評価値 spl_dBA を全代入
+                j_func.x.array[:] = spl_dBA
+                j_func.x.scatter_forward()
 
-            # 時間 t と一緒に関数を書き出すことで、時系列認識 ＆ 評価値の可視化を実現
-            xdmf_wall.write_function(j_func, step)
+                xdmf_wall.write_function(j_func, step)
 
-
-    return float(spl_dBA) # 聴覚補正後の騒音レベル[dBA]
+    return float(spl_dBA)
 
 def rho_fields_from_controls(
     control_points: list,
