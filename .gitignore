@@ -1,3 +1,5 @@
 .zed/
 pyrightconfig.json
 dist/
+.DS_Store
+__pycache__
