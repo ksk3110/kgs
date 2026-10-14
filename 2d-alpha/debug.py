@@ -1,4 +1,4 @@
-from scipy.optimize import minimize
+from scipy.optimize import minimize, differential_evolution
 
 import lib
 import params
@@ -47,10 +47,14 @@ def objective(y_vars):
         return 1e6
 
 bounds = [(2.0, 12.0) for _ in params.y_init]
-res = minimize(
+res = differential_evolution(
     objective,
-    x0=params.y_init,
-    method="COBYLA",
     bounds=bounds,
-    options={"maxiter": 50}
+    strategy='best1bin',
+    maxiter=50,          # 世代数（1世代あたりの評価数は popsize * 変数個数）
+    popsize=15,          # 1世代あたりの個体数倍率
+    mutation=(0.5, 1.0), # 突然変異率（奇抜な探索を促すパラメータ）
+    recombination=0.7,
+    seed=42,             # 再現性が必要な場合は指定
+    disp=True            # 進捗を表示
 )
