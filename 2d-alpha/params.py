@@ -1,6 +1,5 @@
 from mpi4py import MPI
 from dolfinx import mesh
-import numpy as np
 
 # ドメインメッシュを作成
 comm = MPI.COMM_WORLD # MPIコミュニケータ
